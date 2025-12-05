@@ -1,0 +1,91 @@
+name: Deploy Flask App to EC2
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Test with pytest
+      run: |
+        pip install pytest
+        # Create a simple test if you have tests
+        echo "Running tests..."
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup SSH
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
+      run: |
+        mkdir -p ~/.ssh
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+    
+    - name: Deploy to EC2
+      run: |
+        # Copy files to EC2
+        rsync -avz --delete \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='.gitignore' \
+          --exclude='venv' \
+          --exclude='__pycache__' \
+          -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+          ./ ubuntu@${{ secrets.EC2_HOST }}:/var/www/flask-hello/
+    
+    - name: Setup and restart service
+      run: |
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ secrets.EC2_HOST }} << 'EOF'
+          set -e
+          cd /var/www/flask-hello
+          
+          # Create/update virtual environment
+          if [ ! -d venv ]; then
+            python3 -m venv venv
+          fi
+          
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          
+          # Set proper permissions
+          sudo chown -R ubuntu:www-data /var/www/flask-hello
+          sudo chmod -R 755 /var/www/flask-hello
+          
+          # Restart service
+          sudo systemctl daemon-reload
+          sudo systemctl restart flask-hello
+          
+          # Verify service is running
+          sleep 2
+          sudo systemctl status --no-pager flask-hello
+          
+          echo "Deployment completed successfully!"
+        EOF
